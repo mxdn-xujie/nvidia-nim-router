@@ -212,11 +212,14 @@
   });
 
   function finishImport(r) {
-    let msg = '新增 ' + r.added + ' 个 / 跳过 ' + r.skipped + ' 个 / 无效 ' + r.invalid + ' 个';
+    let msg = '新增 ' + r.added + ' 个 / 重复 ' + (r.duplicates || 0) + ' 个 / 无效 ' + r.invalid + ' 个';
+    if (r.duplicates > 0 && r.duplicate_keys && r.duplicate_keys.length) {
+      msg += '（重复Key：' + r.duplicate_keys.slice(0, 5).join(', ') + (r.duplicate_keys.length > 5 ? ' …' : '') + '）';
+    }
     if (r.invalid > 0 && r.invalid_lines && r.invalid_lines.length) {
       msg += '（问题行号：' + r.invalid_lines.slice(0, 20).join(', ') + (r.invalid_lines.length > 20 ? ' …' : '') + '）';
     }
-    App.toast(msg, r.invalid > 0 ? 'warn' : 'success');
+    App.toast(msg, (r.invalid > 0 || r.duplicates > 0) ? 'warn' : 'success');
     document.getElementById('modal-import').classList.remove('show');
     document.getElementById('paste-area').value = '';
     page = 1;
