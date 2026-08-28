@@ -201,7 +201,7 @@ async def test_auto_stream_setting_off_disables_conversion(db):
 
 
 async def test_aggregated_stream_error_returns_error_json(db):
-    """流内 error 事件且无内容：按错误状态码返回 JSON。"""
+    """流内 error 事件且无内容：重试耗尽后按错误状态码返回 JSON。"""
     sse_bytes = sse(
         '{"error":{"message":"Service temporarily overloaded",'
         '"type":"service_unavailable","code":503}}'
@@ -227,6 +227,46 @@ async def test_aggregated_stream_error_returns_error_json(db):
     assert resp.status_code == 503
     body = json.loads(resp.body)
     assert body["error"]["message"] == "Service temporarily overloaded"
+
+
+async def test_instream_error_fails_over_to_next_key(db):
+    """流内错误（HTTP 200 + 503 error 事件）：自动换 Key 重试，下游拿到正常聚合响应。"""
+    auths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auths.append(request.headers.get("authorization"))
+        if len(auths) == 1:
+            # 第一个 Key：上游过载，HTTP 200 + 流内 error 事件
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=sse(
+                    '{"error":{"message":"Service temporarily overloaded",'
+                    '"type":"service_unavailable","code":503}}'
+                ),
+            )
+        # 第二个 Key：正常流式响应
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=CHAT_SSE
+        )
+
+    proxy, _ = make_proxy(db, handler)
+    add_keys(db, 2)
+    ds = db.add_downstream("t", "sk-router-f")
+
+    resp = await proxy.forward(
+        method="POST",
+        path="/chat/completions",
+        headers={},
+        body=json.dumps({"model": "m", "messages": []}).encode(),
+        downstream_id=ds.id,
+        force_stream=True,
+    )
+    assert len(auths) == 2  # 第一个 Key 流内报错 → 自动换第二个 Key
+    assert auths[0] != auths[1]
+    assert resp.status_code == 200
+    body = json.loads(resp.body)
+    assert body["choices"][0]["message"]["content"] == "你好"
 
 
 async def test_non_json_body_not_converted(db):
