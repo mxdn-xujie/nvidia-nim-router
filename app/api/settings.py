@@ -32,6 +32,7 @@ def _settings_view(db: Database) -> dict:
         "admin_password_set": bool(s.get("admin_password")),
         "nvidia_base_url": s.get("nvidia_base_url", "https://integrate.api.nvidia.com/v1"),
         "auto_stream": (s.get("auto_stream") or "1") == "1",
+        "check_rate_per_minute": as_int("check_rate_per_minute", 6),
     }
 
 
@@ -67,7 +68,8 @@ async def update_settings(request: Request) -> dict:
         updates["auto_stream"] = "1" if enabled else "0"
 
     # 数值项：超出范围时收敛到边界
-    for key in ("switch_every", "timeout_ms", "max_retries", "cooldown_seconds"):
+    for key in ("switch_every", "timeout_ms", "max_retries", "cooldown_seconds",
+                "check_rate_per_minute"):
         if key in body:
             low, high = SETTING_RANGES[key]
             try:

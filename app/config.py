@@ -34,6 +34,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "admin_password": "",            # 管理后台密码，空 = 不鉴权
     "nvidia_base_url": "https://integrate.api.nvidia.com/v1",
     "auto_stream": "1",              # 自动流式：非流式请求转流式上游+聚合回包（1 开 / 0 关）
+    "check_rate_per_minute": "6",    # 「全部检测」限速：每分钟检测次数（1-10）
 }
 
 # 设置项取值范围（用于校验/收敛）
@@ -42,6 +43,7 @@ SETTING_RANGES = {
     "timeout_ms": (1000, 120000),
     "max_retries": (1, 5),
     "cooldown_seconds": (10, 600),
+    "check_rate_per_minute": (1, 10),
 }
 
 VALID_STRATEGIES = ("round_robin", "random", "sequential")

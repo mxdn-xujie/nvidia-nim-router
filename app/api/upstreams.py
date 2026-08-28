@@ -16,8 +16,7 @@ if TYPE_CHECKING:
 
 router = APIRouter()
 
-# 连通性检测并发信号量（检测任务数 = 池内 key 总数，动态无上限假设）
-CHECK_CONCURRENCY = 10
+# 检测请求超时；批量检测为限速串行（速率见 check_rate_per_minute 设置，1-10 次/分钟）
 CHECK_TIMEOUT_SECONDS = 5.0
 
 
@@ -112,20 +111,42 @@ async def check_upstream(db: Database, upstream: Upstream, client: httpx.AsyncCl
     return serialize_upstream(updated if updated is not None else upstream)
 
 
-async def _run_check_all(db: Database) -> None:
-    """全部并发检测（后台任务）：Semaphore(10)，任务数 = 池内 key 总数。"""
-    upstream_list = db.get_all_upstreams()
-    semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
-    timeout = httpx.Timeout(CHECK_TIMEOUT_SECONDS, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async def one(u: Upstream) -> None:
-            async with semaphore:
-                try:
-                    await check_upstream(db, u, client)
-                except Exception:  # noqa: BLE001 - 单个失败不影响整体
-                    pass
+async def _run_check_all(db: Database, client: httpx.AsyncClient | None = None) -> None:
+    """限速串行检测（后台任务）：按 check_rate_per_minute（1-10 次/分钟）
+    逐个检测，两次请求之间间隔 60/rate 秒，避免批量检测触发上游限流。
 
-        await asyncio.gather(*(one(u) for u in upstream_list))
+    client：测试注入 MockTransport 客户端；生产路径自建短超时客户端。
+    """
+    upstream_list = db.get_all_upstreams()
+    if not upstream_list:
+        return
+    rate = check_rate_per_minute(db)
+    interval = 60.0 / rate
+
+    async def run_all(c: httpx.AsyncClient) -> None:
+        for i, u in enumerate(upstream_list):
+            if i > 0:
+                await asyncio.sleep(interval)
+            try:
+                await check_upstream(db, u, c)
+            except Exception:  # noqa: BLE001 - 单个失败不影响整体
+                pass
+
+    if client is not None:
+        await run_all(client)
+        return
+    timeout = httpx.Timeout(CHECK_TIMEOUT_SECONDS, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as own:
+        await run_all(own)
+
+
+def check_rate_per_minute(db: Database) -> int:
+    """读取检测限速设置并收敛到 [1, 10]。"""
+    try:
+        rate = int(db.get_setting("check_rate_per_minute") or 6)
+    except (TypeError, ValueError):
+        rate = 6
+    return max(1, min(10, rate))
 
 
 # ---------- CRUD ----------
@@ -191,11 +212,21 @@ async def delete_upstream(request: Request, upstream_id: int) -> dict:
 
 @router.post("/api/upstreams/check_all")
 async def check_all(request: Request) -> dict:
-    """全部并发检测（后台执行，前端轮询列表刷新结果）。"""
+    """限速串行检测（后台执行，前端轮询列表刷新结果）。
+
+    速率由设置 check_rate_per_minute 控制（1-10 次/分钟，间隔 60/rate 秒）。
+    """
     db: Database = request.app.state.db
     total = db.count_upstreams_by_status()["total"]
+    rate = check_rate_per_minute(db)
     asyncio.create_task(_run_check_all(db))
-    return {"started": total}
+    return {
+        "started": total,
+        "rate_per_minute": rate,
+        "interval_seconds": round(60.0 / rate, 1),
+        # 预计总耗时（分钟，不含单个请求本身的耗时）
+        "estimated_minutes": round(total / rate, 1) if rate else 0,
+    }
 
 
 @router.post("/api/upstreams/{upstream_id}/check")
