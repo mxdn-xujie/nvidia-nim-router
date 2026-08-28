@@ -4,7 +4,7 @@ services:
     image: nim-router:latest
     container_name: nim-router
     ports:
-      - "${PORT:-8000}:8000"
+      - "${PORT:-8016}:8000"
     volumes:
       - nim-router-data:/data
     restart: unless-stopped

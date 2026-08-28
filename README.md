@@ -30,7 +30,7 @@
 
 ```bash
 docker build -t nim-router https://github.com/mxdn-xujie/nvidia-nim-router.git && \
-docker run -d --name nim-router -p 8000:8000 -v nim-router-data:/data --restart unless-stopped nim-router
+docker run -d --name nim-router -p 8016:8000 -v nim-router-data:/data --restart unless-stopped nim-router
 ```
 
 或用 docker-compose（推荐，便于后续更新管理）：
@@ -40,7 +40,7 @@ git clone https://github.com/mxdn-xujie/nvidia-nim-router.git && \
 cd nvidia-nim-router && docker compose up -d --build
 ```
 
-启动后浏览器打开 `http://localhost:8000`（远程服务器换成对应 IP）。数据持久化在 Docker volume，容器重启不丢 Key 与统计。
+启动后浏览器打开 `http://localhost:8016`（远程服务器换成对应 IP）。数据持久化在 Docker volume，容器重启不丢 Key 与统计。仍需换端口时用 `PORT=xxxx docker compose up -d --build` 覆盖。
 
 更新版本：
 
@@ -52,7 +52,7 @@ cd nvidia-nim-router && git pull && docker compose up -d --build
 
 ```bash
 pip install -r requirements-dev.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8016
 ```
 
 ## 下游接入示例
@@ -63,7 +63,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://你的服务器:8000/v1",
+    base_url="http://你的服务器:8016/v1",
     api_key="sk-router-你的下游key",
 )
 
@@ -80,7 +80,7 @@ for chunk in resp:
 curl 示例：
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8016/v1/chat/completions \
   -H "Authorization: Bearer sk-router-你的下游key" \
   -H "Content-Type: application/json" \
   -d '{"model": "deepseek-ai/deepseek-r1", "messages": [{"role": "user", "content": "你好"}]}'
