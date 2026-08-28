@@ -253,11 +253,16 @@
   document.getElementById('btn-check-all').addEventListener('click', async () => {
     try {
       const r = await App.api('/api/upstreams/check_all', { method: 'POST' });
-      App.toast('已开始检测 ' + r.started + ' 个 Key，结果稍后刷新');
-      // 检测过程中轮询刷新表格
+      if (!r.started) { App.toast('暂无可检测的 Key', 'warn'); return; }
+      App.toast('已开始限速检测 ' + r.started + ' 个 Key（'
+        + r.rate_per_minute + ' 个/分钟，间隔 ' + r.interval_seconds + ' 秒），'
+        + '预计 ' + r.estimated_minutes + ' 分钟完成', 'warn');
+      // 限速检测耗时较长：按预计时间轮询刷新（上限 2 小时）
+      const pollMs = 3000;
+      const stopMs = Math.min(Math.max(r.estimated_minutes, 1) * 60 * 1000 + 30000, 7200000);
       if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(loadList, 2000);
-      setTimeout(() => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }, 60000);
+      pollTimer = setInterval(loadList, pollMs);
+      setTimeout(() => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }, stopMs);
     } catch (e) { App.toast(e.message, 'error'); }
   });
 

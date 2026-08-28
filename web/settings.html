@@ -47,6 +47,11 @@
         </label>
         <div class="hint">开启后下游无需配置 stream=true：路由对上游强制流式，规避大模型长响应读超时；响应仍是完整 JSON，下游无感知</div>
       </label>
+      <label class="field">
+        <span class="name">批量检测速率（check_rate_per_minute）：<b id="lbl-rate-hint">6</b></span>
+        <input type="range" id="inp-check-rate" min="1" max="10" step="1" value="6">
+        <div class="hint">「全部检测」的限速：每分钟检测 1-10 个 Key，两次请求间隔 60/速率 秒（速率 6 = 每 10 秒一个），避免批量检测触发上游限流</div>
+      </label>
     </div>
 
     <div class="panel">
@@ -113,6 +118,9 @@
     document.getElementById('sel-theme').value = s.theme;
     document.getElementById('inp-base-url').value = s.nvidia_base_url;
     document.getElementById('chk-auto-stream').checked = !!s.auto_stream;
+    document.getElementById('inp-check-rate').value = s.check_rate_per_minute;
+    document.getElementById('lbl-rate-hint').textContent =
+      s.check_rate_per_minute + ' 次/分钟（间隔 ' + (60 / s.check_rate_per_minute).toFixed(1) + ' 秒）';
     document.getElementById('hint-admin').textContent =
       s.admin_password_set ? '当前已启用密码保护；留空保存将关闭鉴权' : '当前未启用鉴权；设置密码后管理 API 需 Bearer 携带';
     document.getElementById('inp-switch').disabled = (s.strategy === 'random');
@@ -120,6 +128,12 @@
 
   document.getElementById('inp-timeout').addEventListener('input', (e) => {
     document.getElementById('lbl-timeout').textContent = e.target.value;
+  });
+
+  document.getElementById('inp-check-rate').addEventListener('input', (e) => {
+    const v = parseInt(e.target.value, 10) || 6;
+    document.getElementById('lbl-rate-hint').textContent =
+      v + ' 次/分钟（间隔 ' + (60 / v).toFixed(1) + ' 秒）';
   });
 
   // 主题即时预览
@@ -146,6 +160,7 @@
       theme: document.getElementById('sel-theme').value,
       admin_password: document.getElementById('inp-admin-password').value,
       auto_stream: document.getElementById('chk-auto-stream').checked,
+      check_rate_per_minute: parseInt(document.getElementById('inp-check-rate').value, 10) || 6,
     };
     if (document.getElementById('chk-unlock').checked) {
       body.nvidia_base_url = document.getElementById('inp-base-url').value.trim();
