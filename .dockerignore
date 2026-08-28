@@ -1,0 +1,15 @@
+.git
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+tests/
+data/
+*.db
+*.db-wal
+*.db-shm
+.venv/
+.env
+.idea/
+.vscode/
+开份文档.md

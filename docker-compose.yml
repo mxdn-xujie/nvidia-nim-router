@@ -1,0 +1,9 @@
+services:
+  nim-router:
+    image: ghcr.io/${DOCKER_USERNAME:-yourname}/nvidia-nim-router:latest
+    container_name: nim-router
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
