@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>下游管理 - NVIDIA NIM Router</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body class="dark">
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo"><div class="mark">N</div><div>NIM Router</div></div>
+    <nav>
+      <a href="/"><span class="icon">◉</span>首页</a>
+      <a href="/upstream.html"><span class="icon">▲</span>上游管理</a>
+      <a href="/downstream.html" class="active"><span class="icon">▼</span>下游管理</a>
+      <a href="/settings.html"><span class="icon">⚙</span>设置</a>
+    </nav>
+    <div class="version">v1.0.0</div>
+  </aside>
+  <main class="main">
+    <div class="page-title">下游管理</div>
+    <div class="page-sub">签发供应用调用的下游访问 Key（OpenAI 兼容接口）</div>
+
+    <div class="endpoint-card">
+      <div>
+        <div class="url" id="endpoint-url">http://…/v1</div>
+        <div class="desc">服务端接口地址（OpenAI SDK 的 base_url）</div>
+      </div>
+      <button class="btn primary" id="btn-copy-endpoint">一键复制</button>
+    </div>
+
+    <div class="toolbar">
+      <button class="btn primary" id="btn-add">添加 Key</button>
+      <div class="spacer"></div>
+      <div class="control" id="cnt-info">共 0 个下游 Key</div>
+    </div>
+
+    <div class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th><th>Key</th><th>启用</th><th>累计请求</th>
+              <th>累计 Token</th><th>最后使用</th><th>创建时间</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 添加 Key 模态框 -->
+<div class="modal-mask" id="modal-add">
+  <div class="modal">
+    <h3>添加下游 Key</h3>
+    <label class="field"><span class="name">名称（备注用途，如：我的应用）</span>
+      <input type="text" id="add-name" placeholder="例如：chatbot-prod">
+    </label>
+    <div class="actions">
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="btn-do-add">生成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 一次性 Key 展示模态框 -->
+<div class="modal-mask" id="modal-show">
+  <div class="modal">
+    <h3>Key 已生成</h3>
+    <div class="hint" style="margin-bottom:10px;">⚠ 完整 Key 仅展示这一次，请立即复制保存：</div>
+    <div class="key-reveal" id="key-reveal"></div>
+    <div class="actions">
+      <button class="btn primary" id="btn-copy-key">复制 Key</button>
+      <button class="btn" data-close>我已保存</button>
+    </div>
+  </div>
+</div>
+
+<button class="theme-toggle" id="theme-btn" title="切换主题">🌙</button>
+<script src="/assets/app.js"></script>
+<script>
+  function maskKey(key) {
+    if (key.length <= 12) return '****' + key.slice(-4);
+    return key.slice(0, 10) + '****' + key.slice(-4);
+  }
+
+  async function loadList() {
+    const data = await App.api('/api/downstreams');
+    document.getElementById('cnt-info').textContent = '共 ' + data.items.length + ' 个下游 Key';
+    const tbody = document.getElementById('tbody');
+    if (!data.items.length) {
+      tbody.innerHTML = '<tr><td colspan="8"><div class="empty">暂无下游 Key，点击「添加 Key」生成</div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.items.map((d) => {
+      return '<tr>'
+        + '<td>' + App.escapeHtml(d.name || '未命名') + '</td>'
+        + '<td><span class="mono">' + App.escapeHtml(maskKey(d.apikey)) + '</span> <button class="btn small ghost" data-copy="' + App.escapeHtml(d.apikey) + '">复制</button></td>'
+        + '<td><label class="switch"><input type="checkbox" data-toggle="' + d.id + '"' + (d.enabled ? ' checked' : '') + '><span class="slider"></span></label></td>'
+        + '<td>' + d.total_requests + '</td>'
+        + '<td>' + App.fmtTokens(d.total_tokens) + '</td>'
+        + '<td class="dim">' + App.timeAgo(d.last_used_at) + '</td>'
+        + '<td class="dim">' + App.fmtTime(d.created_at) + '</td>'
+        + '<td><button class="btn small danger" data-del="' + d.id + '">删除</button></td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  document.getElementById('btn-add').addEventListener('click', () => {
+    document.getElementById('modal-add').classList.add('show');
+  });
+  document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('.modal-mask').forEach((m) => m.classList.remove('show'));
+  }));
+  document.querySelectorAll('.modal-mask').forEach((m) => m.addEventListener('click', (e) => {
+    if (e.target === m) m.classList.remove('show');
+  }));
+
+  document.getElementById('btn-do-add').addEventListener('click', async () => {
+    const name = document.getElementById('add-name').value.trim();
+    try {
+      const created = await App.api('/api/downstreams', {
+        method: 'POST',
+        body: JSON.stringify({ name: name }),
+      });
+      document.getElementById('modal-add').classList.remove('show');
+      document.getElementById('add-name').value = '';
+      document.getElementById('key-reveal').textContent = created.apikey;
+      document.getElementById('modal-show').classList.add('show');
+      loadList();
+    } catch (e) { App.toast(e.message, 'error'); }
+  });
+
+  document.getElementById('btn-copy-key').addEventListener('click', () => {
+    App.copy(document.getElementById('key-reveal').textContent);
+  });
+
+  document.getElementById('tbody').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button');
+    if (btn && btn.dataset.copy) { App.copy(btn.dataset.copy); return; }
+    if (btn && btn.dataset.del) {
+      if (!confirm('确认删除该下游 Key？删除后使用该 Key 的应用将立即失效。')) return;
+      try {
+        await App.api('/api/downstreams/' + btn.dataset.del, { method: 'DELETE' });
+        App.toast('已删除');
+        loadList();
+      } catch (err) { App.toast(err.message, 'error'); }
+    }
+  });
+
+  document.getElementById('tbody').addEventListener('change', async (e) => {
+    const input = e.target.closest('input[data-toggle]');
+    if (!input) return;
+    try {
+      await App.api('/api/downstreams/' + input.dataset.toggle + '/toggle', { method: 'POST' });
+      App.toast(input.checked ? '已启用' : '已禁用');
+    } catch (err) {
+      App.toast(err.message, 'error');
+      loadList();
+    }
+  });
+
+  const endpoint = location.protocol + '//' + location.host + '/v1';
+  document.getElementById('endpoint-url').textContent = endpoint;
+  document.getElementById('btn-copy-endpoint').addEventListener('click', () => App.copy(endpoint));
+
+  document.getElementById('theme-btn').addEventListener('click', () => {
+    const t = App.toggleTheme();
+    document.getElementById('theme-btn').textContent = t === 'light' ? '☀' : '🌙';
+  });
+
+  loadList();
+</script>
+</body>
+</html>

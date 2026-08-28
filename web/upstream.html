@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>上游管理 - NVIDIA NIM Router</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body class="dark">
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo"><div class="mark">N</div><div>NIM Router</div></div>
+    <nav>
+      <a href="/"><span class="icon">◉</span>首页</a>
+      <a href="/upstream.html" class="active"><span class="icon">▲</span>上游管理</a>
+      <a href="/downstream.html"><span class="icon">▼</span>下游管理</a>
+      <a href="/settings.html"><span class="icon">⚙</span>设置</a>
+    </nav>
+    <div class="version">v1.0.0</div>
+  </aside>
+  <main class="main">
+    <div class="page-title">上游管理</div>
+    <div class="page-sub">导入 NVIDIA build.nvidia.com 的 API Key 池，配置调度策略</div>
+
+    <div class="toolbar">
+      <button class="btn primary" id="btn-import">导入 CSV</button>
+      <button class="btn" id="btn-add">添加 Key</button>
+      <button class="btn" id="btn-check-all">全部检测</button>
+      <div class="spacer"></div>
+      <div class="control">
+        调度策略
+        <select id="sel-strategy">
+          <option value="round_robin">轮巡</option>
+          <option value="random">随机</option>
+          <option value="sequential">顺序</option>
+        </select>
+      </div>
+      <div class="control">
+        每 <input type="number" id="inp-switch-every" min="1" max="1000" value="3" style="width:70px"> 次请求切换下一个
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>状态</th><th>Email</th><th>API Key</th><th>最近延时</th><th>状态码</th>
+              <th>最近检测</th><th>累计请求</th><th>累计 Token</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <div id="page-info">共 0 条</div>
+        <div class="pages">
+          <button class="btn small" id="btn-prev">上一页</button>
+          <button class="btn small" id="btn-next">下一页</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 导入 CSV 模态框 -->
+<div class="modal-mask" id="modal-import">
+  <div class="modal">
+    <h3>导入 CSV</h3>
+    <div class="dropzone" id="dropzone">
+      <div class="big">📄</div>
+      <div>拖拽 CSV 文件到此处，或点击选择文件</div>
+      <div style="margin-top:6px;font-size:12px;">格式：email,password,apikey（表头有无均可自动识别）</div>
+      <input type="file" id="file-input" accept=".csv,text/csv" style="display:none">
+    </div>
+    <div class="divider">或 粘贴文本</div>
+    <textarea class="paste-area" id="paste-area" placeholder="email,password,apikey&#10;user@example.com,pass123,nvapi-xxxxxxxx"></textarea>
+    <div class="actions">
+      <button class="btn ghost" id="btn-template">下载模板</button>
+      <div class="spacer"></div>
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="btn-do-import">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加 Key 模态框 -->
+<div class="modal-mask" id="modal-add">
+  <div class="modal">
+    <h3>添加上游 Key</h3>
+    <label class="field"><span class="name">API Key（nvapi- 开头）</span>
+      <input type="text" id="add-apikey" placeholder="nvapi-xxxxxxxx">
+    </label>
+    <label class="field"><span class="name">Email（可选）</span>
+      <input type="text" id="add-email" placeholder="user@example.com">
+    </label>
+    <label class="field"><span class="name">密码（可选）</span>
+      <input type="text" id="add-password" placeholder="">
+    </label>
+    <div class="actions">
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="btn-do-add">添加</button>
+    </div>
+  </div>
+</div>
+
+<button class="theme-toggle" id="theme-btn" title="切换主题">🌙</button>
+<script src="/assets/app.js"></script>
+<script>
+  let page = 1;
+  const SIZE = 50;
+  let total = 0;
+  let pollTimer = null;
+
+  const STATUS_LABEL = { active: 'active', cooldown: '冷却中', invalid: 'invalid', disabled: '已禁用' };
+
+  async function loadList() {
+    const data = await App.api('/api/upstreams?page=' + page + '&size=' + SIZE);
+    total = data.total;
+    const tbody = document.getElementById('tbody');
+    if (!data.items.length) {
+      tbody.innerHTML = '<tr><td colspan="9"><div class="empty">暂无上游 Key，点击「导入 CSV」开始</div></td></tr>';
+    } else {
+      tbody.innerHTML = data.items.map((u) => {
+        const dot = '<span class="dot ' + u.status + '" title="' + (STATUS_LABEL[u.status] || u.status)
+          + (u.status === 'cooldown' ? '，剩余 ' + u.cooldown_remaining + ' 秒' : '') + '"></span>'
+          + (STATUS_LABEL[u.status] || u.status);
+        const latency = u.last_latency_ms == null ? '—' : u.last_latency_ms + ' ms';
+        const code = u.last_http_code == null ? '—' : u.last_http_code;
+        return '<tr>'
+          + '<td>' + dot + '</td>'
+          + '<td class="dim">' + App.escapeHtml(u.email || '—') + '</td>'
+          + '<td><span class="mono">' + App.escapeHtml(u.apikey) + '</span> <button class="btn small ghost" data-copy="' + App.escapeHtml(u.apikey) + '">复制</button></td>'
+          + '<td>' + latency + '</td>'
+          + '<td>' + code + '</td>'
+          + '<td class="dim">' + App.fmtTime(u.last_check_at) + '</td>'
+          + '<td>' + u.total_requests + '</td>'
+          + '<td>' + App.fmtTokens(u.total_tokens) + '</td>'
+          + '<td>'
+          + '<button class="btn small" data-check="' + u.id + '">检测</button> '
+          + '<button class="btn small" data-toggle="' + u.id + '">' + (u.status === 'disabled' ? '启用' : '禁用') + '</button> '
+          + '<button class="btn small danger" data-del="' + u.id + '">删除</button>'
+          + '</td></tr>';
+      }).join('');
+    }
+    document.getElementById('page-info').textContent =
+      '共 ' + total + ' 条 · 第 ' + page + ' / ' + Math.max(1, Math.ceil(total / SIZE)) + ' 页';
+  }
+
+  async function saveStrategy() {
+    const strategy = document.getElementById('sel-strategy').value;
+    const switchEvery = parseInt(document.getElementById('inp-switch-every').value, 10) || 1;
+    try {
+      await App.api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ strategy: strategy, switch_every: switchEvery }),
+      });
+      document.getElementById('inp-switch-every').disabled = (strategy === 'random');
+      App.toast('调度策略已保存');
+    } catch (e) { App.toast(e.message, 'error'); }
+  }
+
+  // ---------- 事件绑定 ----------
+  document.getElementById('btn-import').addEventListener('click', () => {
+    document.getElementById('modal-import').classList.add('show');
+  });
+  document.getElementById('btn-add').addEventListener('click', () => {
+    document.getElementById('modal-add').classList.add('show');
+  });
+  document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('.modal-mask').forEach((m) => m.classList.remove('show'));
+  }));
+  document.querySelectorAll('.modal-mask').forEach((m) => m.addEventListener('click', (e) => {
+    if (e.target === m) m.classList.remove('show');
+  }));
+
+  // 拖拽上传
+  const dz = document.getElementById('dropzone');
+  const fileInput = document.getElementById('file-input');
+  dz.addEventListener('click', () => fileInput.click());
+  dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+  dz.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dz.classList.remove('dragover');
+    if (e.dataTransfer.files.length) doImport(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) doImport(fileInput.files[0]);
+    fileInput.value = '';
+  });
+
+  async function doImport(file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await App.api('/api/upstreams/import', { method: 'POST', body: fd });
+      finishImport(r);
+    } catch (e) { App.toast(e.message, 'error'); }
+  }
+
+  document.getElementById('btn-do-import').addEventListener('click', async () => {
+    const text = document.getElementById('paste-area').value.trim();
+    if (!text) { App.toast('请拖入文件或粘贴 CSV 内容', 'warn'); return; }
+    try {
+      const r = await App.api('/api/upstreams/import', {
+        method: 'POST',
+        body: JSON.stringify({ content: text }),
+      });
+      finishImport(r);
+    } catch (e) { App.toast(e.message, 'error'); }
+  });
+
+  function finishImport(r) {
+    let msg = '新增 ' + r.added + ' 个 / 跳过 ' + r.skipped + ' 个 / 无效 ' + r.invalid + ' 个';
+    if (r.invalid > 0 && r.invalid_lines && r.invalid_lines.length) {
+      msg += '（问题行号：' + r.invalid_lines.slice(0, 20).join(', ') + (r.invalid_lines.length > 20 ? ' …' : '') + '）';
+    }
+    App.toast(msg, r.invalid > 0 ? 'warn' : 'success');
+    document.getElementById('modal-import').classList.remove('show');
+    document.getElementById('paste-area').value = '';
+    page = 1;
+    loadList();
+  }
+
+  document.getElementById('btn-template').addEventListener('click', () => {
+    App.downloadText('accounts-template.csv',
+      'email,password,apikey\nuser@example.com,yourpass,nvapi-xxxxxxxxxxxxxxxxxxxx\ntom@example.com,pass123,nvapi-yyyyyyyyyyyyyyyyyyyyyy\n');
+  });
+
+  document.getElementById('btn-do-add').addEventListener('click', async () => {
+    const apikey = document.getElementById('add-apikey').value.trim();
+    if (!apikey) { App.toast('请填写 API Key', 'warn'); return; }
+    try {
+      await App.api('/api/upstreams', {
+        method: 'POST',
+        body: JSON.stringify({
+          apikey: apikey,
+          email: document.getElementById('add-email').value.trim(),
+          password: document.getElementById('add-password').value.trim(),
+        }),
+      });
+      App.toast('添加成功');
+      document.getElementById('modal-add').classList.remove('show');
+      ['add-apikey', 'add-email', 'add-password'].forEach((id) => document.getElementById(id).value = '');
+      loadList();
+    } catch (e) { App.toast(e.message, 'error'); }
+  });
+
+  document.getElementById('btn-check-all').addEventListener('click', async () => {
+    try {
+      const r = await App.api('/api/upstreams/check_all', { method: 'POST' });
+      App.toast('已开始检测 ' + r.started + ' 个 Key，结果稍后刷新');
+      // 检测过程中轮询刷新表格
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(loadList, 2000);
+      setTimeout(() => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }, 60000);
+    } catch (e) { App.toast(e.message, 'error'); }
+  });
+
+  // 表格操作（事件委托）
+  document.getElementById('tbody').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    if (btn.dataset.copy) { App.copy(btn.dataset.copy); return; }
+    const id = btn.dataset.check || btn.dataset.toggle || btn.dataset.del;
+    if (!id) return;
+    try {
+      if (btn.dataset.check) {
+        btn.disabled = true;
+        await App.api('/api/upstreams/' + id + '/check', { method: 'POST' });
+        App.toast('检测完成');
+        loadList();
+      } else if (btn.dataset.toggle) {
+        await App.api('/api/upstreams/' + id + '/toggle', { method: 'POST' });
+        loadList();
+      } else if (btn.dataset.del) {
+        if (!confirm('确认删除该上游 Key？')) return;
+        await App.api('/api/upstreams/' + id, { method: 'DELETE' });
+        App.toast('已删除');
+        loadList();
+      }
+    } catch (err) { App.toast(err.message, 'error'); }
+  });
+
+  document.getElementById('btn-prev').addEventListener('click', () => {
+    if (page > 1) { page--; loadList(); }
+  });
+  document.getElementById('btn-next').addEventListener('click', () => {
+    if (page < Math.ceil(total / SIZE)) { page++; loadList(); }
+  });
+
+  document.getElementById('sel-strategy').addEventListener('change', saveStrategy);
+  document.getElementById('inp-switch-every').addEventListener('change', saveStrategy);
+
+  document.getElementById('theme-btn').addEventListener('click', () => {
+    const t = App.toggleTheme();
+    document.getElementById('theme-btn').textContent = t === 'light' ? '☀' : '🌙';
+  });
+
+  // 初始化：加载设置 + 列表
+  App.api('/api/settings').then((s) => {
+    document.getElementById('sel-strategy').value = s.strategy;
+    document.getElementById('inp-switch-every').value = s.switch_every;
+    document.getElementById('inp-switch-every').disabled = (s.strategy === 'random');
+  }).catch(() => {});
+  loadList();
+</script>
+</body>
+</html>
