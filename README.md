@@ -25,19 +25,26 @@
 
 ## 一行命令部署
 
+无需克隆仓库，机器上有 Docker 即可（BuildKit 会自动拉取 GitHub 代码构建）：
+
 ```bash
-docker run -d --name nim-router \
-  -p 8000:8000 \
-  -v nim-router-data:/data \
-  ghcr.io/<用户名>/nvidia-nim-router:latest
+docker build -t nim-router https://github.com/mxdn-xujie/nvidia-nim-router.git && \
+docker run -d --name nim-router -p 8000:8000 -v nim-router-data:/data --restart unless-stopped nim-router
 ```
 
-启动后浏览器打开 `http://localhost:8000`。数据持久化在 Docker volume，容器重启不丢 Key 与统计。
-
-也可以用 docker-compose：
+或用 docker-compose（推荐，便于后续更新管理）：
 
 ```bash
-DOCKER_USERNAME=<用户名> docker compose up -d
+git clone https://github.com/mxdn-xujie/nvidia-nim-router.git && \
+cd nvidia-nim-router && docker compose up -d --build
+```
+
+启动后浏览器打开 `http://localhost:8000`（远程服务器换成对应 IP）。数据持久化在 Docker volume，容器重启不丢 Key 与统计。
+
+更新版本：
+
+```bash
+cd nvidia-nim-router && git pull && docker compose up -d --build
 ```
 
 本地开发（Python 3.11+）：
