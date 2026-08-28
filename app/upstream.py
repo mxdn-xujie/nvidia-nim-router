@@ -6,6 +6,8 @@
 - 响应体原样返回（含 content-type）。
 
 故障转移（§6.3）见 failover.py 处置表；重试耗尽后把最后一次上游响应原样透传。
+自动流式（auto_stream 设置开启时）：非流式请求改写为流式发往上游，
+服务端聚合回完整 JSON，规避大模型长响应触发读超时，下游无感知。
 """
 from __future__ import annotations
 
@@ -107,6 +109,157 @@ class StreamUsageParser:
         return self.text_chars // 4
 
 
+class StreamAggregator:
+    """把上游 SSE 流聚合为完整响应 JSON（自动流式：上游流式、下游非流式）。
+
+    兼容 chat.completions（delta.content/reasoning_content/tool_calls）
+    与 legacy completions（choices[].text）两种块格式。
+    """
+
+    _META_KEYS = ("id", "created", "model", "system_fingerprint", "service_tier")
+
+    def __init__(self) -> None:
+        self.meta: dict = {}
+        self.role = "assistant"
+        self.content_parts: list[str] = []
+        self.reasoning_parts: list[str] = []
+        self.text_parts: list[str] = []  # legacy completions
+        self.tool_calls: dict[int, dict] = {}
+        self.finish_reason: str | None = None
+        self.usage: dict | None = None
+        self.stream_error: dict | None = None  # 流内 error 事件（如上游过载 503）
+        self.broken = False
+        self._buf = b""
+
+    def feed(self, chunk: bytes) -> None:
+        self._buf += chunk
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            self._handle_line(line)
+
+    def _handle_line(self, line: bytes) -> None:
+        text = line.decode("utf-8", "replace").strip()
+        if not text.startswith("data:"):
+            return
+        payload = text[5:].strip()
+        if not payload or payload == "[DONE]":
+            return
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            return
+        if not isinstance(obj, dict):
+            return
+        if isinstance(obj.get("error"), dict) and self.stream_error is None:
+            # 上游以 HTTP 200 + 流内 error 事件报错（如过载），记录首个错误
+            self.stream_error = obj["error"]
+        for key in self._META_KEYS:
+            if obj.get(key) is not None and key not in self.meta:
+                self.meta[key] = obj[key]
+        usage = obj.get("usage")
+        if isinstance(usage, dict) and usage.get("total_tokens") is not None:
+            self.usage = usage
+        choices = obj.get("choices")
+        if not isinstance(choices, list):
+            return
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            if choice.get("finish_reason"):
+                self.finish_reason = choice["finish_reason"]
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                if delta.get("role"):
+                    self.role = str(delta["role"])
+                if isinstance(delta.get("content"), str):
+                    self.content_parts.append(delta["content"])
+                if isinstance(delta.get("reasoning_content"), str):
+                    self.reasoning_parts.append(delta["reasoning_content"])
+                self._merge_tool_calls(delta.get("tool_calls"))
+            elif isinstance(choice.get("text"), str):
+                self.text_parts.append(choice["text"])
+
+    def _merge_tool_calls(self, tcs: object) -> None:
+        if not isinstance(tcs, list):
+            return
+        for tc in tcs:
+            if not isinstance(tc, dict):
+                continue
+            try:
+                idx = int(tc.get("index", 0))
+            except (TypeError, ValueError):
+                idx = 0
+            slot = self.tool_calls.setdefault(
+                idx, {"id": None, "type": "function", "function": {"name": None, "arguments": ""}}
+            )
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function")
+            if isinstance(fn, dict):
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]
+                if isinstance(fn.get("arguments"), str):
+                    slot["function"]["arguments"] += fn["arguments"]
+
+    @property
+    def tokens(self) -> int:
+        if self.usage is not None:
+            try:
+                return int(self.usage["total_tokens"])
+            except (KeyError, TypeError, ValueError):
+                pass
+        text_len = sum(len(s) for s in self.content_parts) + sum(len(s) for s in self.text_parts)
+        return text_len // 4
+
+    def has_content(self) -> bool:
+        return bool(
+            self.content_parts or self.text_parts or self.reasoning_parts or self.tool_calls
+        )
+
+    def to_response(self) -> dict:
+        """重建完整响应体；usage 缺失时按文本长度估算。"""
+        if self.text_parts and not self.content_parts and not self.tool_calls:
+            # legacy /v1/completions
+            return {
+                **self.meta,
+                "object": "text_completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "".join(self.text_parts),
+                        "logprobs": None,
+                        "finish_reason": self.finish_reason or "stop",
+                    }
+                ],
+                "usage": self.usage or self._estimated_usage(),
+            }
+        message: dict = {"role": self.role, "content": "".join(self.content_parts)}
+        if self.reasoning_parts:
+            message["reasoning_content"] = "".join(self.reasoning_parts)
+        if self.tool_calls:
+            message["tool_calls"] = [self.tool_calls[i] for i in sorted(self.tool_calls)]
+        return {
+            "id": self.meta.get("id"),
+            "object": "chat.completion",
+            "created": self.meta.get("created"),
+            "model": self.meta.get("model"),
+            "system_fingerprint": self.meta.get("system_fingerprint"),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "logprobs": None,
+                    "finish_reason": self.finish_reason or "stop",
+                }
+            ],
+            "usage": self.usage or self._estimated_usage(),
+        }
+
+    def _estimated_usage(self) -> dict:
+        est = self.tokens
+        return {"prompt_tokens": 0, "completion_tokens": est, "total_tokens": est}
+
+
 def extract_usage_tokens(content: bytes) -> int:
     """非流式响应：直接读取 usage.total_tokens。"""
     try:
@@ -177,14 +330,32 @@ class UpstreamProxy:
         headers: dict,
         body: bytes | None,
         downstream_id: int,
+        force_stream: bool = False,
     ) -> Response:
-        """透传转发一次下游请求（含故障转移与统计）。"""
+        """透传转发一次下游请求（含故障转移与统计）。
+
+        force_stream：自动流式开关开启时，非流式请求会被改写为流式发往上游，
+        并在服务端聚合回完整 JSON 返回（下游无感知），避免长响应触发读超时。
+        """
         db = self._db
         base_url = (db.get_setting("nvidia_base_url") or "").rstrip("/")
         timeout_ms = _to_int(db.get_setting("timeout_ms"), 30000)
         max_retries = _to_int(db.get_setting("max_retries"), 3)
         cooldown_seconds = _to_int(db.get_setting("cooldown_seconds"), 60)
         client = await self._get_client(timeout_ms)
+
+        # 自动流式：非流式请求改写为 stream=true（设置关闭或 body 非 JSON 时保持原样）
+        aggregate = False
+        send_body = body
+        if force_stream and (db.get_setting("auto_stream") or "1") != "0" and body:
+            try:
+                obj = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                obj = None
+            if isinstance(obj, dict) and not obj.get("stream"):
+                obj["stream"] = True
+                send_body = _json_bytes(obj)
+                aggregate = True
 
         url = f"{base_url}{path}" + (f"?{query}" if query else "")
         exclude: set[int] = set()
@@ -203,7 +374,7 @@ class UpstreamProxy:
             req_headers = dict(headers)
             req_headers["Authorization"] = f"Bearer {upstream.apikey}"
             try:
-                req = client.build_request(method, url, headers=req_headers, content=body)
+                req = client.build_request(method, url, headers=req_headers, content=send_body)
                 resp = await client.send(req, stream=True)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 # 连接/读超时、网络不可达：冷却 + 换 key 重试
@@ -216,7 +387,9 @@ class UpstreamProxy:
             else:
                 status = resp.status_code
                 if 200 <= status < 300:
-                    return await self._handle_success(resp, upstream, downstream_id)
+                    return await self._handle_success(
+                        resp, upstream, downstream_id, aggregate=aggregate
+                    )
                 # 非成功：读取 body 用于判定与透传
                 content = await resp.aread()
                 resp_headers = {
@@ -257,12 +430,21 @@ class UpstreamProxy:
         return Response(content=content, status_code=status, headers=resp_headers)
 
     # ---------- 成功响应处理 ----------
-    async def _handle_success(self, resp: httpx.Response, upstream: Upstream, downstream_id: int) -> Response:
+    async def _handle_success(
+        self,
+        resp: httpx.Response,
+        upstream: Upstream,
+        downstream_id: int,
+        aggregate: bool = False,
+    ) -> Response:
         content_type = (resp.headers.get("content-type") or "").lower()
         headers = {
             k: v for k, v in resp.headers.items() if k.lower() not in RESPONSE_STRIP_HEADERS
         }
         if "text/event-stream" in content_type:
+            if aggregate:
+                # 自动流式：上游流式 → 服务端聚合 → 下游拿到完整 JSON
+                return await self._aggregate_stream_response(resp, upstream, downstream_id)
             return self._make_stream_response(resp, upstream, downstream_id, headers)
         # 非流式：读全量 body，解析 usage token
         content = await resp.aread()
@@ -270,6 +452,65 @@ class UpstreamProxy:
         tokens = extract_usage_tokens(content)
         self._finalize_success(upstream.id, downstream_id, tokens)
         return Response(content=content, status_code=resp.status_code, headers=headers)
+
+    async def _aggregate_stream_response(
+        self,
+        resp: httpx.Response,
+        upstream: Upstream,
+        downstream_id: int,
+    ) -> Response:
+        """消费上游 SSE 流并聚合为完整 JSON 响应（自动流式的非流式回包）。"""
+        aggregator = StreamAggregator()
+        try:
+            async for chunk in resp.aiter_bytes():
+                aggregator.feed(chunk)
+        except Exception:  # noqa: BLE001 - 网络异常：尽力返回已聚合内容
+            aggregator.broken = True
+        try:
+            await resp.aclose()
+        except Exception:  # noqa: BLE001 - 收尾阶段尽力关闭
+            pass
+
+        # 流内 error 且无任何内容：按错误原样返回（如上游过载 503）
+        if aggregator.stream_error is not None and not aggregator.has_content():
+            code = aggregator.stream_error.get("code") or 502
+            try:
+                status = int(code)
+            except (TypeError, ValueError):
+                status = 502
+            self._db.record_upstream_failure(upstream.id, error="stream error event")
+            self._stats.record_request(0)
+            return Response(
+                content=_json_bytes({"error": aggregator.stream_error}),
+                status_code=status,
+                media_type="application/json",
+            )
+        if aggregator.broken and not aggregator.has_content():
+            # 断流且无内容：无法重试（响应可能已部分消费），返回网关错误
+            self._db.record_upstream_failure(upstream.id, error="stream interrupted")
+            self._stats.record_request(0)
+            return Response(
+                content=_json_bytes(router_error_body(502, "upstream stream interrupted")),
+                status_code=502,
+                media_type="application/json",
+            )
+
+        tokens = aggregator.tokens
+        self._db.record_upstream_success(upstream.id, tokens)
+        self._db.record_downstream_usage(downstream_id, tokens)
+        self._stats.record_request(tokens)
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._scheduler.report_success(upstream.id))
+        except RuntimeError:  # pragma: no cover - 无运行循环时跳过窗口计数
+            pass
+        return Response(
+            content=_json_bytes(aggregator.to_response()),
+            status_code=200,
+            media_type="application/json",
+        )
 
     def _make_stream_response(
         self,
