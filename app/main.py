@@ -21,7 +21,7 @@ from .stats import StatsEngine
 from .upstream import REQUEST_STRIP_HEADERS, UpstreamProxy
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)"
+    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
 )
 logger = logging.getLogger("router")
 

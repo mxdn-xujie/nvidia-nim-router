@@ -6,8 +6,8 @@
 - 响应体原样返回（含 content-type）。
 
 故障转移（§6.3）见 failover.py 处置表；重试耗尽后把最后一次上游响应原样透传。
-自动流式（auto_stream 设置开启时）：非流式请求改写为流式发往上游，
-服务端聚合回完整 JSON，规避大模型长响应触发读超时，下游无感知。
+自动流式（auto_stream）：非流式请求改写为 stream=true 发往上游，服务端聚合回完整 JSON，
+下游无感知，规避大模型长响应读超时。
 """
 from __future__ import annotations
 
