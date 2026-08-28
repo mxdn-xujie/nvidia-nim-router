@@ -21,7 +21,7 @@ from .stats import StatsEngine
 from .upstream import REQUEST_STRIP_HEADERS, UpstreamProxy
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)"
 )
 logger = logging.getLogger("router")
 
@@ -115,7 +115,7 @@ def _forward_headers(request: Request) -> dict:
 async def proxy_chat_completions(
     request: Request, downstream: Downstream = Depends(require_downstream_key)
 ):
-    """核心端点：完整支持流式。"""
+    """核心端点：完整支持流式；非流式请求经自动流式转换为聚合回包。"""
     return await request.app.state.proxy.forward(
         method="POST",
         path="/chat/completions",
@@ -123,6 +123,7 @@ async def proxy_chat_completions(
         headers=_forward_headers(request),
         body=await request.body(),
         downstream_id=downstream.id,
+        force_stream=True,
     )
 
 
@@ -137,6 +138,7 @@ async def proxy_completions(
         headers=_forward_headers(request),
         body=await request.body(),
         downstream_id=downstream.id,
+        force_stream=True,
     )
 
 
