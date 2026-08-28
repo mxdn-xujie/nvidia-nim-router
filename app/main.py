@@ -154,10 +154,11 @@ async def proxy_models(request: Request, downstream: Downstream = Depends(requir
     )
 
 
-@app.get("/v1/models/{model}")
+@app.get("/v1/models/{model:path}")
 async def proxy_model_detail(
     request: Request, model: str, downstream: Downstream = Depends(require_downstream_key)
 ):
+    """:path 转换器：NVIDIA 模型 ID 含斜杠（如 nvidia/nemotron-...），需整段匹配。"""
     return await request.app.state.proxy.forward(
         method="GET",
         path=f"/models/{model}",
