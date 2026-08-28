@@ -39,6 +39,14 @@
         <input type="number" id="inp-cooldown" min="10" max="600" value="60" style="width:120px">
         <div class="hint">429 / 超时后 Key 的冷却时长（10–600 秒）</div>
       </label>
+      <label class="field">
+        <span class="name">自动流式（auto_stream）</span>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="chk-auto-stream" checked>
+          非流式请求自动转为流式上游并在服务端聚合回包
+        </label>
+        <div class="hint">开启后下游无需配置 stream=true：路由对上游强制流式，规避大模型长响应读超时；响应仍是完整 JSON，下游无感知</div>
+      </label>
     </div>
 
     <div class="panel">
@@ -104,6 +112,7 @@
     document.getElementById('inp-switch').value = s.switch_every;
     document.getElementById('sel-theme').value = s.theme;
     document.getElementById('inp-base-url').value = s.nvidia_base_url;
+    document.getElementById('chk-auto-stream').checked = !!s.auto_stream;
     document.getElementById('hint-admin').textContent =
       s.admin_password_set ? '当前已启用密码保护；留空保存将关闭鉴权' : '当前未启用鉴权；设置密码后管理 API 需 Bearer 携带';
     document.getElementById('inp-switch').disabled = (s.strategy === 'random');
@@ -136,6 +145,7 @@
       switch_every: parseInt(document.getElementById('inp-switch').value, 10) || 3,
       theme: document.getElementById('sel-theme').value,
       admin_password: document.getElementById('inp-admin-password').value,
+      auto_stream: document.getElementById('chk-auto-stream').checked,
     };
     if (document.getElementById('chk-unlock').checked) {
       body.nvidia_base_url = document.getElementById('inp-base-url').value.trim();
