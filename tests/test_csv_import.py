@@ -27,7 +27,7 @@ def test_import_with_header(db):
     """带表头文件：added=37，表头跳过，空行忽略，invalid=0。"""
     result = import_csv(db, make_csv(with_header=True))
     assert result["added"] == 37
-    assert result["skipped"] == 0
+    assert result["duplicates"] == 0
     assert result["invalid"] == 0
     assert result["header_detected"] is True
     assert result["total_in_file"] == 38  # 表头 1 + 数据 37
@@ -37,20 +37,30 @@ def test_import_without_header(db):
     """无表头文件：同样 added=37（表头有无自适应）。"""
     result = import_csv(db, make_csv(with_header=False))
     assert result["added"] == 37
-    assert result["skipped"] == 0
+    assert result["duplicates"] == 0
     assert result["invalid"] == 0
     assert result["header_detected"] is False
     assert result["total_in_file"] == 37
 
 
 def test_reimport_all_skipped(db):
-    """重复导入：added=0, skipped=37（去重生效）。"""
+    """重复导入：added=0, duplicates=37（库内去重生效）。"""
     text = make_csv(with_header=True)
     first = import_csv(db, text)
     assert first["added"] == 37
     second = import_csv(db, text)
     assert second["added"] == 0
-    assert second["skipped"] == 37
+    assert second["duplicates"] == 37
+    assert len(second["duplicate_keys"]) == 20  # 脱敏列表封顶展示
+
+
+def test_in_file_duplicate_detected(db):
+    """文件内重复：同一 Key 出现多次只导入一次，其余计入 duplicates。"""
+    text = "a@x.com,p,nvapi-dup-key\nb@y.com,q,nvapi-dup-key\nc@z.com,r,nvapi-uni-key\n"
+    result = import_csv(db, text)
+    assert result["added"] == 2
+    assert result["duplicates"] == 1
+    assert result["duplicate_keys"] == ["nvapi-****-key"]
 
 
 # ---------- 解析规则 ----------
