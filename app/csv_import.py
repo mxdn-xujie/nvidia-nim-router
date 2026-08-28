@@ -9,7 +9,7 @@
 5. 列序容错：自动定位 apikey（nvapi- 开头）/ email（含 @）/ password（剩余字段）；
 6. 单列容错：整行仅一个 nvapi- 字段时 email/password 存 NULL；
 7. 非法行（无 nvapi- 且非表头）计入 invalid 并记录原文件行号；
-8. 去重：库内重复与文件内重复均计入 duplicates，并返回脱敏 Key 明细。
+8. 去重：apikey 已存在则计入 duplicates（库内与文件内重复均检测并返回明细）。
 """
 from __future__ import annotations
 
