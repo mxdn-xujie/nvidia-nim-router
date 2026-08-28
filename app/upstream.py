@@ -7,7 +7,8 @@
 
 故障转移（§6.3）见 failover.py 处置表；重试耗尽后把最后一次上游响应原样透传。
 自动流式（auto_stream）：非流式请求改写为 stream=true 发往上游，服务端聚合回完整 JSON，
-下游无感知，规避大模型长响应读超时。
+下游无感知，规避大模型长响应读超时；流内 error 事件（HTTP 200 + error）按其状态码
+走与 HTTP 错误相同的故障转移流程（如过载 503 → 自动换 Key 重试）。
 """
 from __future__ import annotations
 
@@ -336,6 +337,8 @@ class UpstreamProxy:
 
         force_stream：自动流式开关开启时，非流式请求会被改写为流式发往上游，
         并在服务端聚合回完整 JSON 返回（下游无感知），避免长响应触发读超时。
+        流内 error 事件（HTTP 200 + error）按其状态码走与 HTTP 错误相同的
+        故障转移流程（如上游过载 503 → 自动换 Key 重试）。
         """
         db = self._db
         base_url = (db.get_setting("nvidia_base_url") or "").rstrip("/")
@@ -387,15 +390,23 @@ class UpstreamProxy:
             else:
                 status = resp.status_code
                 if 200 <= status < 300:
-                    return await self._handle_success(
+                    result = await self._handle_success(
                         resp, upstream, downstream_id, aggregate=aggregate
                     )
-                # 非成功：读取 body 用于判定与透传
-                content = await resp.aread()
-                resp_headers = {
-                    k: v for k, v in resp.headers.items() if k.lower() not in RESPONSE_STRIP_HEADERS
-                }
-                await resp.aclose()
+                    if isinstance(result, Response):
+                        return result
+                    # 流内错误且无内容（HTTP 200 + error 事件）：按该状态码
+                    # 走与 HTTP 错误完全相同的分类与换 Key 重试流程
+                    status, content = result
+                    resp_headers = {"content-type": "application/json"}
+                else:
+                    # 非成功：读取 body 用于判定与透传
+                    content = await resp.aread()
+                    resp_headers = {
+                        k: v for k, v in resp.headers.items()
+                        if k.lower() not in RESPONSE_STRIP_HEADERS
+                    }
+                    await resp.aclose()
                 last = (status, resp_headers, content)
 
                 action = classify_status(status)
@@ -436,7 +447,12 @@ class UpstreamProxy:
         upstream: Upstream,
         downstream_id: int,
         aggregate: bool = False,
-    ) -> Response:
+    ) -> Response | tuple[int, bytes]:
+        """处理 2xx 响应。
+
+        返回 Response 为最终回包；返回 (status, body) 表示自动流式聚合时
+        遇到流内 error 事件且无内容，由调用方按该状态码进入故障转移。
+        """
         content_type = (resp.headers.get("content-type") or "").lower()
         headers = {
             k: v for k, v in resp.headers.items() if k.lower() not in RESPONSE_STRIP_HEADERS
@@ -458,8 +474,12 @@ class UpstreamProxy:
         resp: httpx.Response,
         upstream: Upstream,
         downstream_id: int,
-    ) -> Response:
-        """消费上游 SSE 流并聚合为完整 JSON 响应（自动流式的非流式回包）。"""
+    ) -> Response | tuple[int, bytes]:
+        """消费上游 SSE 流并聚合为完整 JSON 响应（自动流式的非流式回包）。
+
+        流内 error 事件且无任何内容时返回 (status, error_body)，
+        调用方据此做换 Key 重试（如上游过载 503）。
+        """
         aggregator = StreamAggregator()
         try:
             async for chunk in resp.aiter_bytes():
@@ -471,28 +491,19 @@ class UpstreamProxy:
         except Exception:  # noqa: BLE001 - 收尾阶段尽力关闭
             pass
 
-        # 流内 error 且无任何内容：按错误原样返回（如上游过载 503）
+        # 流内 error 且无任何内容：交给调用方按状态码分类重试
         if aggregator.stream_error is not None and not aggregator.has_content():
             code = aggregator.stream_error.get("code") or 502
             try:
                 status = int(code)
             except (TypeError, ValueError):
                 status = 502
-            self._db.record_upstream_failure(upstream.id, error="stream error event")
-            self._stats.record_request(0)
-            return Response(
-                content=_json_bytes({"error": aggregator.stream_error}),
-                status_code=status,
-                media_type="application/json",
-            )
+            return (status, _json_bytes({"error": aggregator.stream_error}))
         if aggregator.broken and not aggregator.has_content():
-            # 断流且无内容：无法重试（响应可能已部分消费），返回网关错误
-            self._db.record_upstream_failure(upstream.id, error="stream interrupted")
-            self._stats.record_request(0)
-            return Response(
-                content=_json_bytes(router_error_body(502, "upstream stream interrupted")),
-                status_code=502,
-                media_type="application/json",
+            # 断流且无内容：同样交给调用方重试（502 → 换 Key）
+            return (
+                502,
+                _json_bytes(router_error_body(502, "upstream stream interrupted")),
             )
 
         tokens = aggregator.tokens
