@@ -9,7 +9,7 @@
 5. 列序容错：自动定位 apikey（nvapi- 开头）/ email（含 @）/ password（剩余字段）；
 6. 单列容错：整行仅一个 nvapi- 字段时 email/password 存 NULL；
 7. 非法行（无 nvapi- 且非表头）计入 invalid 并记录原文件行号；
-8. 去重：apikey 已存在则计入 skipped（INSERT OR IGNORE）。
+8. 去重：库内重复与文件内重复均计入 duplicates，并返回脱敏 Key 明细。
 """
 from __future__ import annotations
 
@@ -99,19 +99,34 @@ def parse_csv_text(text: str) -> ParsedCsv:
     return result
 
 
+def _mask_key(apikey: str) -> str:
+    """重复 Key 的脱敏展示（与上游管理页掩码规则一致）。"""
+    if apikey.startswith("nvapi-"):
+        return f"nvapi-****{apikey[-4:]}"
+    return f"****{apikey[-4:]}"
+
+
 def import_csv(db: Database, content: str) -> dict:
-    """解析并导入到数据库，返回文档 §5.2 规定的结果结构。"""
+    """解析并导入到数据库，返回文档 §5.2 规定的结果结构（含重复明细）。"""
     parsed = parse_csv_text(content)
     added = 0
-    skipped = 0
+    duplicates: list[str] = []  # 脱敏后的重复 Key
+    seen_in_file: set[str] = set()
     for row in parsed.rows:
+        if row.apikey in seen_in_file:
+            # 文件内重复：同一 Key 在本次导入内容中出现多次
+            duplicates.append(_mask_key(row.apikey))
+            continue
+        seen_in_file.add(row.apikey)
         if db.add_upstream(row.email, row.password, row.apikey):
             added += 1
         else:
-            skipped += 1
+            # 库内重复：Key 已存在于上游池
+            duplicates.append(_mask_key(row.apikey))
     return {
         "added": added,
-        "skipped": skipped,
+        "duplicates": len(duplicates),
+        "duplicate_keys": duplicates[:20],  # 最多展示 20 个，避免响应过大
         "invalid": len(parsed.invalid_lines),
         "invalid_lines": parsed.invalid_lines,
         "total_in_file": parsed.total_in_file,

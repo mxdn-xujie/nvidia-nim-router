@@ -31,6 +31,7 @@ def _settings_view(db: Database) -> dict:
         "theme": s.get("theme", "dark"),
         "admin_password_set": bool(s.get("admin_password")),
         "nvidia_base_url": s.get("nvidia_base_url", "https://integrate.api.nvidia.com/v1"),
+        "auto_stream": (s.get("auto_stream") or "1") == "1",
     }
 
 
@@ -57,6 +58,13 @@ async def update_settings(request: Request) -> dict:
         if theme not in VALID_THEMES:
             raise HTTPException(status_code=400, detail="theme 必须是 dark/light")
         updates["theme"] = theme
+
+    if "auto_stream" in body:
+        # 自动流式开关：truthy → "1"，否则 "0"
+        enabled = body["auto_stream"]
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("1", "true", "on", "yes")
+        updates["auto_stream"] = "1" if enabled else "0"
 
     # 数值项：超出范围时收敛到边界
     for key in ("switch_every", "timeout_ms", "max_retries", "cooldown_seconds"):
